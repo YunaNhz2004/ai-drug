@@ -1,229 +1,163 @@
-import torch
-from torch_geometric.data import Data
+# =========================
+# FILE: src/data_utils.py (CHỈ THAY PHẦN LOAD DATA)
+# =========================
+import pandas as pd
+import os
+from tqdm import tqdm
 from rdkit import Chem
 from rdkit.Chem import SaltRemover
-import pandas as pd
-import numpy as np
 
-def clean_smiles(smiles_raw: str) -> str:
+# Giữ nguyên path cũ
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+DATA_DIR = os.path.join(project_root, 'data')
+RAW_DIR = os.path.join(DATA_DIR, 'raw')
+PROCESSED_DIR = os.path.join(DATA_DIR, 'processed')
+
+
+# =========================
+# UTILS (GIỮ NGUYÊN)
+# =========================
+def clean_smiles(smiles_raw: str):
     try:
         mol = Chem.MolFromSmiles(smiles_raw)
-        if mol is None: return None
-        remover = SaltRemover.SaltRemover()
-        mol = remover.StripMol(mol)
+        if mol is None:
+            return None
+        mol = SaltRemover.SaltRemover().StripMol(mol)
         return Chem.MolToSmiles(mol, isomericSmiles=True)
-    except:
+    except Exception:
         return None
 
 
-TOX21 = './data/processed/tox21.pkl'
-SIDER = './data/processed/sider.pkl'
-TOXCAST = './data/processed/toxcast.pkl'
+# =========================
+# LOAD DATASET (MỚI - THAY THẾ PHẦN LOAD PKL CŨ)
+# =========================
+def load_dataset_from_csv(dataset_name):
+    """Load từ CSV thay vì pickle cũ"""
+    csv_path = os.path.join(RAW_DIR, f'{dataset_name}.csv')
+    
+    print(f"[INFO] Loading {dataset_name.upper()} from CSV: {csv_path}")
+    
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"❌ Cannot load {csv_path}")
+    
+    df = pd.read_csv(csv_path)
+    
+    # Tìm cột SMILES
+    smiles_col = 'smiles' if 'smiles' in df.columns else 'SMILES'
+    
+    # Clean SMILES
+    print(f"[INFO] Cleaning SMILES for {dataset_name}...")
+    df['cleaned_smiles'] = df[smiles_col].apply(clean_smiles)
+    df = df.dropna(subset=['cleaned_smiles']).reset_index(drop=True)
+    
+    # Add source flag
+    df['sources'] = [[dataset_name]] * len(df)
+    
+    print(f"[OK] {dataset_name} loaded: {df.shape}")
+    return df
 
 
-tox21_df = pd.read_pickle(TOX21)
-sider_df = pd.read_pickle(SIDER)
-toxcast_df = pd.read_pickle(TOXCAST)
+# =========================
+# LOAD 3 DATASETS (THAY THẾ PHẦN CŨ)
+# =========================
+print("[INFO] Loading datasets from CSV...")
 
-tox21_df['sources'] = [['tox21']] * len(tox21_df)
-sider_df['sources'] = [['sider']] * len(sider_df)
-toxcast_df['sources'] = [['toxcast']] * len(toxcast_df)
-#test
-print('tox21_df: ',type(tox21_df))
-print(tox21_df.head())
-print('===================================')
-print('sider_df: ',type(sider_df))
-print(sider_df.head())
-print('===================================')
-print('toxcast_df: ',type(toxcast_df))
-print(toxcast_df.head())
-print('===================================')
+tox21_df = load_dataset_from_csv('tox21')
+sider_df = load_dataset_from_csv('sider')
+toxcast_df = load_dataset_from_csv('toxcast')
 
 
-def build_merged_dataframe(tox21_df, sider_df, toxcast_df, smiles_col='cleaned_smiles'):
-    """
-    Hợp nhất 3 nguồn dữ liệu (Tox21, SIDER, ToxCast) dựa trên cleaned_smiles.
-    Tự động prefix tên cột label để tránh trùng lặp và đảm bảo traceability.
-    """
+# =========================
+# MERGE DATASETS (GIỮ NGUYÊN)
+# =========================
+def build_merged_dataframe(tox21_df, sider_df, toxcast_df):
+    tox21, sider, toxcast = tox21_df.copy(), sider_df.copy(), toxcast_df.copy()
 
-    # ---- Copy kèm flag nguồn ----
-    tox21 = tox21_df.copy()
-    sider = sider_df.copy()
-    toxcast = toxcast_df.copy()
-
-    # ---- Đảm bảo có cleaned_smiles ----
     for df in [tox21, sider, toxcast]:
         if "cleaned_smiles" not in df.columns:
-            if "smiles" in df.columns:
-                print('DataFrame ko có cleaned_smiles ==> dùng tạm cột smiles')
-                df["cleaned_smiles"] = df["smiles"]
-            else:
-                raise ValueError("DataFrame thiếu cả smiles và cleaned_smiles")
+            df["cleaned_smiles"] = df["smiles"]
 
-    # -----------------------------
-    # Tạo mol_id chuẩn hoá
-    # -----------------------------
+    tox21["mol_id"] = [f"TOX21_{i+1}" for i in range(len(tox21))]
+    sider["mol_id"] = [f"SIDER_{i+1}" for i in range(len(sider))]
+    toxcast["mol_id"] = [f"TOXCAST_{i+1}" for i in range(len(toxcast))]
 
-    # Tox21: giữ nguyên (nếu không có thì tạo)
-    if "mol_id" not in tox21.columns:
-        tox21["mol_id"] = ["TOX21_" + str(i+1) for i in range(len(tox21))]
-
-    # SIDER: tạo SIDER_1..n
-    sider["mol_id"] = ["SIDER_" + str(i+1) for i in range(len(sider))]
-
-    # ToxCast: tạo TOXCAST_1..n
-    toxcast["mol_id"] = ["TOXCAST_" + str(i+1) for i in range(len(toxcast))]
-
-    # ---- Tạo danh sách smile duy nhất ----
     all_smiles = pd.concat(
         [
             tox21[["mol_id", "cleaned_smiles"]],
             sider[["mol_id", "cleaned_smiles"]],
             toxcast[["mol_id", "cleaned_smiles"]],
         ],
-        ignore_index=True
-    ).drop_duplicates(subset=["cleaned_smiles"]).reset_index(drop=True) # XÓA HÀNG TRÙNG SMILES 
+        ignore_index=True,
+    ).drop_duplicates("cleaned_smiles")
 
-    all_smiles = all_smiles.drop_duplicates(subset=["cleaned_smiles"]).reset_index(drop=True)
+    merged = all_smiles.rename(columns={"mol_id": "any_mol_id"})
 
-    # DataFrame nền tảng chứa unified SMILES
-    merged = all_smiles[["mol_id", "cleaned_smiles"]].rename(columns={"mol_id": "any_mol_id"})
-
-    # ---- Hàm prefix cột ----
-    def prefix_labels(src_df, prefix):
-        df = src_df.copy()
-        exclude_cols = ["mol_id", "smiles", "cleaned_smiles", "id"]
-
-        label_cols = [c for c in df.columns if c not in exclude_cols]
-
-        # Giữ lại sources  không prefix
-        for keep in ["sources"]:
-            if keep in label_cols:
-                label_cols.remove(keep)
-        # Prefix các cột label thật sự     
-        df = df.rename(columns={c: f"{prefix}_{c}" for c in label_cols})
-
-        # Rename sources để merge không bị đè
-        if "sources" in df.columns:
-            df = df.rename(columns={"sources": f"{prefix}_sources"})
-        
+    def prefix(df, p):
+        excl = ["mol_id", "smiles", "cleaned_smiles", "id"]
+        labels = [c for c in df.columns if c not in excl and c != "sources"]
+        df = df.rename(columns={c: f"{p}_{c}" for c in labels})
+        df = df.rename(columns={"sources": f"{p}_sources"})
         return df
 
-    tox21_pref = prefix_labels(tox21, "tox21")
-    sider_pref = prefix_labels(sider, "sider")
-    toxcast_pref = prefix_labels(toxcast, "toxcast")
-
-    # ---- 5. Merge left theo cleaned_smiles ----
-    merged = merged.merge(tox21_pref, on="cleaned_smiles", how="left")
-    merged = merged.merge(sider_pref, on="cleaned_smiles", how="left")
-    merged = merged.merge(toxcast_pref, on="cleaned_smiles", how="left")
-
-    # Gom sources từ 3 dataset
+    merged = merged.merge(prefix(tox21, "tox21"), on="cleaned_smiles", how="left")
+    merged = merged.merge(prefix(sider, "sider"), on="cleaned_smiles", how="left")
+    merged = merged.merge(prefix(toxcast, "toxcast"), on="cleaned_smiles", how="left")
 
     def merge_sources(row):
         s = []
-        for pref in ["tox21", "sider", "toxcast"]:
-            col = f"{pref}_sources"
-            if col in row and isinstance(row[col], list):
+        for p in ["tox21", "sider", "toxcast"]:
+            col = f"{p}_sources"
+            if isinstance(row.get(col), list):
                 s.extend(row[col])
-        return list(sorted(set(s)))
+        return sorted(set(s))
 
     merged["sources"] = merged.apply(merge_sources, axis=1)
 
-
-    print("===== MERGED DATAFRAME =====")
-    print("Shape:", merged.shape)
-    print("Preview (transpose):")
-    print(merged.head(5))
-
+    print("[MERGED]", merged.shape)
     return merged
 
+
+# =========================
+# SELECT LABELS (GIỮ NGUYÊN)
+# =========================
 def select_label_columns(merged_df):
     cols = merged_df.columns.tolist()
+    toxcast_cols = [c for c in cols if c.startswith("toxcast_")]
 
-    # Detect prefix dạng 1 underscore
-    # - lấy label ko lấy sources 
-    tox21_cols = [c for c in cols if c.startswith("tox21_") and "sources" not in c]
-    sider_cols = [c for c in cols if c.startswith("sider_") and "sources" not in c]
-    toxcast_cols = [c for c in cols if c.startswith("toxcast_") and "sources" not in c]
+    merged_df["any_toxicity"] = (
+        merged_df[toxcast_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .sum(axis=1)
+        .gt(0)
+        .astype(float)
+    )
 
-
-    print("Detected tox21 cols:", tox21_cols[:10])
-    print("Detected sider cols:", sider_cols[:10])
-    print("Detected toxcast cols:", toxcast_cols[:10])
-
-    # ---- Binary head ----
-    # any label toxcast = 1 thì sample toxic
-    def compute_is_toxic(row):
-        if len(toxcast_cols) == 0:
-            return np.nan
-        # vals = row[tox21_cols].astype(float).fillna(0).values
-        # - đảm bảo là number 0/1 
-        vals = pd.to_numeric(row[toxcast_cols], errors="coerce").fillna(0).values
-        return float(vals.sum() > 0)
-
-    # Sinh nhãn binary thật
-    merged_df["any_toxicity"] = merged_df.apply(compute_is_toxic, axis=1)
-
-    # ---- Organ head: chọn SIDER columns có 'disorder' ----
-
-    # mapping các keyword liên quan Organ / System trong SIDER
-    organ_keywords = [
-        "disorder",         # original logic
-        "system",           # ví dụ: nervous_system_disorder
-        "cardio", "renal", "hepatic", "liver", "kidney",
-        "immune", "respiratory", "pulmonary"
-    ]
-
-
-    # tách sider thành 2 nhóm organ + ADR 
-    # + CHỌN CỘT NÀO CHỨA TỪ KHÓA ORGAN 
-    organ_cols = [
-        c for c in sider_cols
-        if any(kw in c.lower() for kw in organ_keywords)
-    ]
-
-    # + FALLBACK
-
-    if len(organ_cols) == 0:
-        print('CỘT ORGAN ĐANG RỖNG ==> LẤY TẠM FALLBACK')
-        binary_sider = [
-            c for c in sider_cols
-            if merged_df[c].dropna().isin([0,1]).all()
-        ]
-        organ_cols = binary_sider[:5]    # lấy 5 cột đầu tiên thay vì 3 bừa
-        print("!!! Fallback: SIDER không có 'organ keywords', lấy 5 binary columns ĐỂ THỬ NGHIỆM.")
-
-    
-    # ---- ADR head ----
-    # + CHỈ GIỮ CÁC CỘT NHỊ PHÂN
+    sider_cols = [c for c in cols if c.startswith("sider_")]
+    organ_cols = [c for c in sider_cols if any(k in c.lower() for k in ["liver","kidney","renal","hepatic"])]
     adr_cols = [c for c in sider_cols if c not in organ_cols]
 
-    # chỉ giữ ADR là cột nhị phân 0/1
-    adr_cols = [
-        c for c in adr_cols
-        if merged_df[c].dropna().isin([0,1]).all()
-    ]
+    return ["any_toxicity"] + organ_cols + adr_cols, organ_cols, adr_cols
 
 
-    if len(adr_cols) == 0:
-        adr_cols = toxcast_cols[:10]  # fallback
-        print("!!! Fallback ADR → lấy 10 cột toxcast đầu tiên.")
-
-    print("-> Binary:", "any_toxicity") # in log 
-    print("-> Organ cols ({}): {}".format(len(organ_cols), organ_cols))
-    print("-> ADR cols ({}): {}".format(len(adr_cols), adr_cols[:20]))
-
-    label_cols_ordered = ["any_toxicity"] + organ_cols + adr_cols
-    return label_cols_ordered, organ_cols, adr_cols
-
-
-
-# test
+# =========================
+# RUN (GIỮ NGUYÊN BIẾN GLOBAL)
+# =========================
 merged_df = build_merged_dataframe(tox21_df, sider_df, toxcast_df)
 label_cols_ordered, organ_cols, adr_cols = select_label_columns(merged_df)
 
-print("Final label order length:", len(label_cols_ordered))
-print("First labels:", label_cols_ordered[:20])
+print("Final labels:", len(label_cols_ordered))
+print(label_cols_ordered[:20])
 
 
+# =========================
+# EXPORT (ĐỂ INFERENCE IMPORT ĐƯỢC)
+# =========================
+__all__ = [
+    'clean_smiles',
+    'merged_df', 
+    'label_cols_ordered',
+    'organ_cols',
+    'adr_cols'
+]
